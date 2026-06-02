@@ -1,0 +1,13 @@
+[package]
+name = "const-array-concat"
+version = "0.1.0"
+authors = ["Daniel Bloom"]
+edition = "2024"
+rust-version = "1.85.1"
+description = "Concatenate fixed-size arrays at compile time without copying"
+license = "MIT OR Apache-2.0"
+keywords = ["array", "concat", "no_std", "const"]
+categories = ["no-std", "data-structures"]
+
+[dependencies]
+const_panic = { version = "0.2.15", default-features = false }

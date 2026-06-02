@@ -220,8 +220,7 @@ where
         // so its SIZE * size_of::<T>() bytes are identical in layout to [T; N].
         // The const assert above guarantees N == Self::SIZE, so the sizes match.
         // ManuallyDrop prevents a double-drop of src after the bit-copy.
-        let v = unsafe { mem::transmute_copy(&src) };
-        v
+        unsafe { mem::transmute_copy(&src) }
     }
 }
 
