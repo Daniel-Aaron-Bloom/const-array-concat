@@ -91,15 +91,68 @@ macro_rules! concat_arrays {
 pub unsafe trait ConcatableArray: AsRef<[Self::T]> + AsMut<[Self::T]> {
     /// The element type.
     type T;
+    /// The same array type parameterized over a different element type `U`.
+    type OtherArray<U>: ConcatableArray<T = U>;
     /// The number of elements.
     const SIZE: usize;
+
+    /// Returns an array whose elements are initialized to their [`Default`] values.
+    fn default() -> Self
+    where
+        Self::T: Default;
+
+    /// Returns a new array with each element cloned from `self`.
+    fn clone(&self) -> Self
+    where
+        Self::T: Clone;
+
+    /// Overwrites each element of `self` by cloning from the corresponding element of `source`.
+    fn clone_from(&mut self, source: &Self)
+    where
+        Self::T: Clone,
+    {
+        self.as_mut()
+            .iter_mut()
+            .zip(source.as_ref())
+            .for_each(|(dst, src)| dst.clone_from(src));
+    }
+
+    /// Returns a new array built by calling `f(index)` for each position.
+    fn from_fn(f: impl FnMut(usize) -> Self::T) -> Self;
+
+    /// Returns a new array produced by applying `f` to each element.
+    fn map<U>(self, f: impl FnMut(Self::T) -> U) -> Self::OtherArray<U>;
 }
 
 // SAFETY: [T; N] is exactly N * size_of::<T>() bytes with no padding, which
 // satisfies the no-padding requirement of ConcatableArray.
 unsafe impl<T, const N: usize> ConcatableArray for [T; N] {
     type T = T;
+    type OtherArray<U> = [U; N];
     const SIZE: usize = N;
+
+    fn default() -> Self
+    where
+        Self::T: Default,
+    {
+        core::array::from_fn(|_| Default::default())
+    }
+
+    fn clone(&self) -> Self
+    where
+        Self::T: Clone,
+    {
+        Clone::clone(self)
+    }
+
+    fn from_fn(f: impl FnMut(usize) -> T) -> Self {
+        core::array::from_fn(f)
+    }
+
+    fn map<U>(self, mut f: impl FnMut(T) -> U) -> [U; N] {
+        let mut iter = self.into_iter().map(&mut f);
+        core::array::from_fn(|_| iter.next().unwrap())
+    }
 }
 
 /// Two [`ConcatableArray`]s laid out contiguously in memory.
@@ -112,7 +165,51 @@ unsafe impl<T, const N: usize> ConcatableArray for [T; N] {
 /// Use [`new`](Self::new) to construct, and [`as_ref`](AsRef::as_ref) /
 /// [`as_mut`](AsMut::as_mut) to access the combined slice.
 #[repr(C)]
+#[derive(Default, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ArrayConcat<T, A, B>([T; 0], A, B);
+
+// SAFETY: ArrayConcat is #[repr(C)] with a [T; 0] sentinel, A, then B. Both A
+// and B have no padding (ConcatableArray invariant), and repr(C) adds no
+// padding between fields of the same alignment, so the struct itself has no
+// padding and is exactly (A::SIZE + B::SIZE) * size_of::<T>() bytes.
+unsafe impl<T, A, B> ConcatableArray for ArrayConcat<T, A, B>
+where
+    A: ConcatableArray<T = T>,
+    B: ConcatableArray<T = T>,
+{
+    type T = T;
+    type OtherArray<U> = ArrayConcat<U, A::OtherArray<U>, B::OtherArray<U>>;
+    const SIZE: usize = A::SIZE + B::SIZE;
+
+    fn default() -> Self
+    where
+        Self::T: Default,
+    {
+        Self([], A::default(), B::default())
+    }
+
+    fn clone(&self) -> Self
+    where
+        Self::T: Clone,
+    {
+        Self([], self.1.clone(), self.2.clone())
+    }
+
+    fn from_fn(mut f: impl FnMut(usize) -> T) -> Self {
+        let a = A::from_fn(&mut f);
+        let b = B::from_fn(|i| f(A::SIZE + i));
+        Self([], a, b)
+    }
+
+    fn map<U>(
+        self,
+        mut f: impl FnMut(T) -> U,
+    ) -> ArrayConcat<U, A::OtherArray<U>, B::OtherArray<U>> {
+        let a = self.1.map(&mut f);
+        let b = self.2.map(&mut f);
+        ArrayConcat([], a, b)
+    }
+}
 
 impl<T, A, B> ArrayConcat<T, A, B>
 where
@@ -248,19 +345,6 @@ where
     }
 }
 
-// SAFETY: ArrayConcat is #[repr(C)] with a [T; 0] sentinel, A, then B. Both A
-// and B have no padding (ConcatableArray invariant), and repr(C) adds no
-// padding between fields of the same alignment, so the struct itself has no
-// padding and is exactly (A::SIZE + B::SIZE) * size_of::<T>() bytes.
-unsafe impl<T, A, B> ConcatableArray for ArrayConcat<T, A, B>
-where
-    A: ConcatableArray<T = T>,
-    B: ConcatableArray<T = T>,
-{
-    type T = T;
-    const SIZE: usize = A::SIZE + B::SIZE;
-}
-
 /// Assert at compile time that these types have the same size.
 ///
 /// This is an implementation detail of the crate and should only be used by the
@@ -393,8 +477,133 @@ mod tests {
     }
 
     #[test]
+    fn decompose_round_trip() {
+        let concat = ArrayConcat::new([1u8, 2, 3], [4u8, 5]);
+        let (a, b) = ArrayConcat::decompose(ManuallyDrop::new(concat));
+        assert_eq!(*a, [1u8, 2, 3]);
+        assert_eq!(*b, [4u8, 5]);
+    }
+
+    #[test]
+    fn decompose_no_double_drop() {
+        use core::cell::Cell;
+
+        struct DropCount<'a>(&'a Cell<u32>);
+        impl Drop for DropCount<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let count = Cell::new(0u32);
+        let concat = ArrayConcat::new([DropCount(&count)], [DropCount(&count)]);
+        let (a, b) = ArrayConcat::decompose(ManuallyDrop::new(concat));
+        assert_eq!(count.get(), 0, "items dropped before expected");
+        drop(ManuallyDrop::into_inner(a));
+        assert_eq!(count.get(), 1);
+        drop(ManuallyDrop::into_inner(b));
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
     fn macro_trailing_comma() {
         let arr = concat_arrays!([1u8, 2], [3u8, 4],);
         assert_eq!(arr.as_ref(), &[1u8, 2, 3, 4]);
+    }
+
+    // --- ConcatableArray trait methods ---
+
+    #[test]
+    fn default_array() {
+        let arr = <[u8; 4] as ConcatableArray>::default();
+        assert_eq!(arr, [0u8; 4]);
+    }
+
+    #[test]
+    fn default_array_concat() {
+        let arr = <Concat<u8, 3, 2> as ConcatableArray>::default();
+        assert_eq!(arr.as_ref(), &[0u8; 5]);
+    }
+
+    #[test]
+    fn clone_array() {
+        let src = [1u8, 2, 3];
+        let dst = ConcatableArray::clone(&src);
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn clone_array_concat() {
+        let src: Concat<u8, 3, 2> = ArrayConcat::new([1, 2, 3], [4, 5]);
+        let dst = ConcatableArray::clone(&src);
+        assert_eq!(dst.as_ref(), src.as_ref());
+    }
+
+    #[test]
+    fn clone_from_array() {
+        let src = [10u8, 20, 30];
+        let mut dst = [1u8, 2, 3];
+        ConcatableArray::clone_from(&mut dst, &src);
+        assert_eq!(dst, [10u8, 20, 30]);
+    }
+
+    #[test]
+    fn clone_from_array_concat() {
+        let src: Concat<u8, 2, 2> = ArrayConcat::new([10, 20], [30, 40]);
+        let mut dst: Concat<u8, 2, 2> = ArrayConcat::new([1, 2], [3, 4]);
+        ConcatableArray::clone_from(&mut dst, &src);
+        assert_eq!(dst.as_ref(), &[10u8, 20, 30, 40]);
+    }
+
+    #[test]
+    fn from_fn_array() {
+        let arr = <[u32; 4] as ConcatableArray>::from_fn(|i| i as u32 * 10);
+        assert_eq!(arr, [0, 10, 20, 30]);
+    }
+
+    #[test]
+    fn from_fn_array_concat() {
+        let arr = <Concat<u32, 3, 2> as ConcatableArray>::from_fn(|i| i as u32);
+        assert_eq!(arr.as_ref(), &[0u32, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn from_fn_index_offset_is_global() {
+        // Ensures B's from_fn receives indices A::SIZE..SIZE, not 0..B::SIZE.
+        let arr = <Concat<usize, 2, 3> as ConcatableArray>::from_fn(|i| i);
+        assert_eq!(arr.as_ref(), &[0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn map_array() {
+        let arr = [1u8, 2, 3, 4].map(|x| x * 2);
+        assert_eq!(arr, [2u8, 4, 6, 8]);
+    }
+
+    #[test]
+    fn map_array_concat() {
+        let arr: Concat<u8, 3, 2> = ArrayConcat::new([1, 2, 3], [4, 5]);
+        let mapped = ConcatableArray::map(arr, |x: u8| x * 2);
+        assert_eq!(mapped.as_ref(), &[2u8, 4, 6, 8, 10]);
+    }
+
+    #[test]
+    fn map_changes_element_type() {
+        let arr: Concat<u8, 2, 2> = ArrayConcat::new([1, 2], [3, 4]);
+        let mapped = ConcatableArray::map(arr, |x: u8| x as u32 + 100);
+        assert_eq!(mapped.as_ref(), &[101u32, 102, 103, 104]);
+    }
+
+    #[test]
+    fn map_preserves_order_across_boundary() {
+        let mut call_order: [usize; 4] = [0; 4];
+        let mut idx = 0;
+        let arr: Concat<u8, 2, 2> = ArrayConcat::new([10, 20], [30, 40]);
+        ConcatableArray::map(arr, |x: u8| {
+            call_order[idx] = x as usize;
+            idx += 1;
+            x
+        });
+        assert_eq!(call_order, [10, 20, 30, 40]);
     }
 }
