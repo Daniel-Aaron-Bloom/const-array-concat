@@ -80,6 +80,141 @@ macro_rules! concat_arrays {
     };
 }
 
+/// Type-level counterpart to [`concat_arrays!`].
+///
+/// Expands to the exact type that `concat_arrays!` would produce for the same
+/// argument count, so it can be used to annotate a `let` binding:
+///
+/// ```rust
+/// use const_array_concat::{concat_arrays, concat_arrays_type};
+///
+/// let result: concat_arrays_type!([u8; 2], [u8; 3], [u8; 1]) =
+///     concat_arrays!([1u8, 2], [3u8, 4, 5], [6u8]);
+/// assert_eq!(result.as_ref(), &[1, 2, 3, 4, 5, 6]);
+/// ```
+///
+/// Two forms are accepted:
+///
+/// - `concat_arrays_type!(A, B, C, …)` — the element type is inferred from the
+///   first argument via `<A as ConcatableArray>::T`.
+/// - `concat_arrays_type!(T; A, B, C, …)` — the element type is given
+///   explicitly, which is required when the argument list may be empty (e.g.
+///   `type Foo = concat_arrays_type!(u8;)` in a macro-generated type alias,
+///   where the inferred form would yield an unresolvable `[_; 0]`).
+///
+/// As with `concat_arrays!`, zero arguments yields `[_; 0]` (requires
+/// inference at the use site) and a single argument is passed through
+/// unchanged.
+#[macro_export]
+macro_rules! concat_arrays_type {
+    () => { [_; 0] };
+    ($a:ty $(,)?) => { $a };
+    ($a:ty, $($rest:ty),+ $(,)?) => {
+        $crate::__concat_arrays_type_build!(
+            <$a as $crate::ConcatableArray>::T,
+            $crate::ArrayConcat<
+                <$a as $crate::ConcatableArray>::T,
+                [<$a as $crate::ConcatableArray>::T; 0],
+                $a
+            >,
+            $($rest),+
+        )
+    };
+    ($t:ty;) => { [$t; 0] };
+    ($t:ty; $a:ty $(,)?) => { $a };
+    ($t:ty; $a:ty, $($rest:ty),+ $(,)?) => {
+        $crate::__concat_arrays_type_build!(
+            $t,
+            $crate::ArrayConcat<$t, [$t; 0], $a>,
+            $($rest),+
+        )
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __concat_arrays_type_build {
+    ($t:ty, $acc:ty $(,)?) => { $acc };
+    // 16 at a time
+    ($t:ty, $acc:ty,
+     $a1:ty, $a2:ty, $a3:ty, $a4:ty,
+     $a5:ty, $a6:ty, $a7:ty, $a8:ty,
+     $a9:ty, $a10:ty, $a11:ty, $a12:ty,
+     $a13:ty, $a14:ty, $a15:ty, $a16:ty
+     $(, $($rest:ty),*)? $(,)?) => {
+        $crate::__concat_arrays_type_build!(
+            $t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+                $acc, $a1>, $a2>, $a3>, $a4>,
+                $a5>, $a6>, $a7>, $a8>,
+                $a9>, $a10>, $a11>, $a12>,
+                $a13>, $a14>, $a15>, $a16>
+            $($(, $rest)*)?
+        )
+    };
+    // 8 at a time
+    ($t:ty, $acc:ty,
+     $a1:ty, $a2:ty, $a3:ty, $a4:ty,
+     $a5:ty, $a6:ty, $a7:ty, $a8:ty
+     $(, $($rest:ty),*)? $(,)?) => {
+        $crate::__concat_arrays_type_build!(
+            $t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+                $acc, $a1>, $a2>, $a3>, $a4>,
+                $a5>, $a6>, $a7>, $a8>
+            $($(, $rest)*)?
+        )
+    };
+    // 4 at a time
+    ($t:ty, $acc:ty,
+     $a1:ty, $a2:ty, $a3:ty, $a4:ty
+     $(, $($rest:ty),*)? $(,)?) => {
+        $crate::__concat_arrays_type_build!(
+            $t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+            $crate::ArrayConcat<$t,
+                $acc, $a1>, $a2>, $a3>, $a4>
+            $($(, $rest)*)?
+        )
+    };
+    // 2 at a time
+    ($t:ty, $acc:ty, $a1:ty, $a2:ty $(, $($rest:ty),*)? $(,)?) => {
+        $crate::__concat_arrays_type_build!(
+            $t,
+            $crate::ArrayConcat<$t, $crate::ArrayConcat<$t, $acc, $a1>, $a2>
+            $($(, $rest)*)?
+        )
+    };
+    // 1 (remainder)
+    ($t:ty, $acc:ty, $next:ty $(,)?) => {
+        $crate::ArrayConcat<$t, $acc, $next>
+    };
+}
+
 /// Marker trait for arrays that can participate in a concatenation.
 ///
 /// # Safety
@@ -503,6 +638,56 @@ mod tests {
         assert_eq!(count.get(), 1);
         drop(ManuallyDrop::into_inner(b));
         assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn concat_arrays_type_two() {
+        let _: concat_arrays_type!([u8; 2], [u8; 3]) = concat_arrays!([1u8, 2], [3u8, 4, 5]);
+    }
+
+    #[test]
+    fn concat_arrays_type_three() {
+        let result: concat_arrays_type!([u8; 2], [u8; 2], [u8; 2]) =
+            concat_arrays!([1u8, 2], [3u8, 4], [5u8, 6]);
+        assert_eq!(result.as_ref(), &[1u8, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn concat_arrays_type_single_passthrough() {
+        let result: concat_arrays_type!([u8; 3]) = concat_arrays!([7u8, 8, 9]);
+        assert_eq!(result, [7u8, 8, 9]);
+    }
+
+    #[test]
+    fn concat_arrays_type_explicit_t() {
+        let result: concat_arrays_type!(u8; [u8; 2], [u8; 3]) =
+            concat_arrays!([1u8, 2], [3u8, 4, 5]);
+        assert_eq!(result.as_ref(), &[1u8, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn concat_arrays_type_with_nested_first_arg() {
+        // First arg is itself an ArrayConcat, exercising ConcatableArray::T
+        // projection through the recursive impl.
+        type Inner = ArrayConcat<u8, [u8; 0], [u8; 2]>;
+        let inner: Inner = ArrayConcat::new([], [1u8, 2]);
+        let result: concat_arrays_type!(Inner, [u8; 2]) = concat_arrays!(inner, [3u8, 4]);
+        assert_eq!(result.as_ref(), &[1u8, 2, 3, 4]);
+    }
+
+    #[test]
+    fn concat_arrays_type_trailing_comma() {
+        let _: concat_arrays_type!([u8; 1], [u8; 1],) = concat_arrays!([1u8], [2u8]);
+        let _: concat_arrays_type!(u8; [u8; 1], [u8; 1],) = concat_arrays!([1u8], [2u8]);
+    }
+
+    #[test]
+    fn concat_arrays_type_matches_value_macro_size() {
+        let value = concat_arrays!([1u8, 2], [3u8, 4, 5], [6u8]);
+        assert_eq!(
+            mem::size_of::<concat_arrays_type!([u8; 2], [u8; 3], [u8; 1])>(),
+            mem::size_of_val(&value),
+        );
     }
 
     #[test]
